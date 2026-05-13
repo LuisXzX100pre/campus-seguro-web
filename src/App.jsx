@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import {
   Routes,
   Route,
@@ -6,7 +6,7 @@ import {
   useNavigate,
   useSearchParams,
 } from "react-router-dom"
-import { Html5QrcodeScanner } from "html5-qrcode"
+import { Html5Qrcode } from "html5-qrcode"
 import {
   collection,
   doc,
@@ -369,11 +369,13 @@ function Input({ label, ...props }) {
 function PairingPage() {
   const [searchParams] = useSearchParams()
   const navigate = useNavigate()
+  const scannerRef = useRef(null)
 
   const [student, setStudent] = useState(() => getSavedStudent())
   const [sessionId, setSessionId] = useState(searchParams.get("session") || "")
   const [manualSession, setManualSession] = useState("")
   const [scanning, setScanning] = useState(false)
+  const [cameraError, setCameraError] = useState("")
   const [message, setMessage] = useState("")
   const [loading, setLoading] = useState(false)
 
@@ -384,28 +386,74 @@ function PairingPage() {
   useEffect(() => {
     if (!scanning || sessionId) return
 
-    const scanner = new Html5QrcodeScanner(
-      "qr-reader",
-      {
-        fps: 10,
-        qrbox: 220,
-      },
-      false
-    )
+    let html5QrCode = null
 
-    scanner.render(
-      (decodedText) => {
-        const extracted = extractSessionId(decodedText).trim().toUpperCase()
-        setSessionId(extracted)
+    async function startCamera() {
+      try {
+        setCameraError("")
+
+        const isSecure =
+          window.location.protocol === "https:" ||
+          window.location.hostname === "localhost"
+
+        if (!isSecure) {
+          setCameraError("La cámara solo funciona en HTTPS o localhost.")
+          setScanning(false)
+          return
+        }
+
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          setCameraError("Tu navegador no permite usar la cámara.")
+          setScanning(false)
+          return
+        }
+
+        html5QrCode = new Html5Qrcode("qr-reader")
+        scannerRef.current = html5QrCode
+
+        await html5QrCode.start(
+          { facingMode: "environment" },
+          {
+            fps: 10,
+            qrbox: {
+              width: 220,
+              height: 220,
+            },
+          },
+          async (decodedText) => {
+            const extracted = extractSessionId(decodedText).trim().toUpperCase()
+
+            setSessionId(extracted)
+            setMessage("Código detectado correctamente.")
+            setScanning(false)
+
+            try {
+              await html5QrCode.stop()
+              await html5QrCode.clear()
+            } catch {
+              // No pasa nada si ya se cerró
+            }
+          },
+          () => {}
+        )
+      } catch (error) {
+        console.error(error)
+        setCameraError(
+          "No se pudo abrir la cámara. Revisa permisos del navegador."
+        )
         setScanning(false)
-        setMessage("Código detectado correctamente.")
-        scanner.clear().catch(() => {})
-      },
-      () => {}
-    )
+      }
+    }
+
+    startCamera()
 
     return () => {
-      scanner.clear().catch(() => {})
+      if (scannerRef.current) {
+        scannerRef.current
+          .stop()
+          .then(() => scannerRef.current?.clear())
+          .catch(() => {})
+      }
     }
   }, [scanning, sessionId])
 
@@ -539,11 +587,23 @@ function PairingPage() {
                     <p className="mt-2 rounded-xl bg-zinc-100 px-4 py-3 text-lg font-black text-[#009B86]">
                       {sessionId}
                     </p>
+
+                    <button
+                      onClick={() => {
+                        setSessionId("")
+                        setManualSession("")
+                        setMessage("")
+                        setCameraError("")
+                      }}
+                      className="mt-4 text-xs font-bold text-zinc-400"
+                    >
+                      Escanear otro código
+                    </button>
                   </div>
                 </div>
               ) : scanning ? (
                 <div className="overflow-hidden rounded-xl">
-                  <div id="qr-reader" />
+                  <div id="qr-reader" className="w-full" />
                 </div>
               ) : (
                 <div className="grid min-h-[210px] place-items-center text-center">
@@ -553,15 +613,29 @@ function PairingPage() {
                     </div>
 
                     <button
-                      onClick={() => setScanning(true)}
+                      onClick={() => {
+                        setCameraError("")
+                        setMessage("")
+                        setScanning(true)
+                      }}
                       className="mt-6 rounded-xl bg-zinc-900 px-5 py-3 text-sm font-black text-white"
                     >
                       Iniciar escaneo
                     </button>
+
+                    <p className="mt-3 text-xs text-zinc-400">
+                      El navegador pedirá permiso para usar la cámara.
+                    </p>
                   </div>
                 </div>
               )}
             </div>
+
+            {cameraError && (
+              <p className="mt-4 rounded-xl bg-red-50 px-4 py-3 text-center text-sm font-bold text-red-600">
+                {cameraError}
+              </p>
+            )}
 
             <form onSubmit={handleLink} className="mt-5 grid gap-4">
               {!sessionId && (
@@ -610,7 +684,10 @@ function LinkedSuccessPage() {
 
         <p className="mt-3 max-w-[270px] text-sm leading-6 text-zinc-500">
           El reloj quedó asociado correctamente a la matrícula{" "}
-          <strong className="text-[#009B86]">{student?.matricula || "—"}</strong>.
+          <strong className="text-[#009B86]">
+            {student?.matricula || "—"}
+          </strong>
+          .
         </p>
 
         <Link
